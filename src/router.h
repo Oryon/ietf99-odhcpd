@@ -23,7 +23,6 @@ struct icmpv6_opt {
 	uint8_t data[6];
 };
 
-
 #define icmpv6_for_each_option(opt, start, end)\
 	for (opt = (struct icmpv6_opt*)(start);\
 	(void*)(opt + 1) <= (void*)(end) && opt->len > 0 &&\

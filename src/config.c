@@ -45,6 +45,10 @@ enum {
 	IFACE_ATTR_PD_CER,
 	IFACE_ATTR_NDPROXY_ROUTING,
 	IFACE_ATTR_NDPROXY_SLAVE,
+	IFACE_ATTR_PVD_ID,
+	IFACE_ATTR_PVD_HTTP,
+	IFACE_ATTR_PVD_LEGACY,
+	IFACE_ATTR_PREFIX_FILTER,
 	IFACE_ATTR_MAX
 };
 
@@ -78,6 +82,10 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
 	[IFACE_ATTR_RA_MAXINTERVAL] = { .name = "ra_maxinterval", .type = BLOBMSG_TYPE_INT32 },
 	[IFACE_ATTR_NDPROXY_ROUTING] = { .name = "ndproxy_routing", .type = BLOBMSG_TYPE_BOOL },
 	[IFACE_ATTR_NDPROXY_SLAVE] = { .name = "ndproxy_slave", .type = BLOBMSG_TYPE_BOOL },
+	[IFACE_ATTR_PVD_ID] = { .name = "pvd_id", .type = BLOBMSG_TYPE_STRING },
+	[IFACE_ATTR_PVD_HTTP] = { .name = "pvd_http", .type = BLOBMSG_TYPE_BOOL },
+	[IFACE_ATTR_PVD_LEGACY] = { .name = "pvd_legacy", .type = BLOBMSG_TYPE_BOOL },
+	[IFACE_ATTR_PREFIX_FILTER] = { .name = "prefix_filter", .type = BLOBMSG_TYPE_STRING },
 };
 
 static const struct uci_blob_param_info iface_attr_info[IFACE_ATTR_MAX] = {
@@ -572,6 +580,54 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 	if ((c = tb[IFACE_ATTR_NDPROXY_SLAVE]))
 		iface->external = blobmsg_get_bool(c);
+
+	if ((c = tb[IFACE_ATTR_PVD_ID])) {
+		const char *u = blobmsg_get_string(c);
+		syslog(LOG_ERR, "PVD ID (v2): %s", u);
+		size_t len = 1;
+		iface->pvd_id = malloc(strlen(u) + 2);
+		uint8_t *curr_label_len = &iface->pvd_id[0];
+		iface->pvd_id[0] = 0;
+		for (; *u != '\0'; u++) {
+			if (*u == '.') {
+				if (*curr_label_len == 0 && *(u+1) != '\0') // No empty label except at the end
+					return -1;
+				syslog(LOG_ERR, "Label length: %d", *curr_label_len);
+				curr_label_len = &iface->pvd_id[len];
+				*curr_label_len = 0;
+			} else {
+				iface->pvd_id[len] = *u;
+				(*curr_label_len)++;
+			}
+			len++;
+		}
+		iface->pvd_id_len = len;
+	}
+
+	if ((c = tb[IFACE_ATTR_PVD_HTTP]))
+		iface->pvd_http = blobmsg_get_bool(c);
+
+	if ((c = tb[IFACE_ATTR_PVD_LEGACY]))
+		iface->pvd_legacy = blobmsg_get_bool(c);
+
+	if ((c = tb[IFACE_ATTR_PREFIX_FILTER])) {
+		const char *str = blobmsg_get_string(c);
+		syslog(LOG_ERR, "Filter prefix %s", str);
+		char *astr = malloc(strlen(str) + 1);
+		strcpy(astr, str);
+		char *delim;
+		int l;
+		if ((delim = strchr(astr, '/')) == NULL || (*(delim++) = 0) ||
+				sscanf(delim, "%i", &l) == 0 || l > 128 ||
+				inet_pton(AF_INET6, astr, &iface->pio_filter_addr) == 0) {
+			syslog(LOG_ERR, "Error parsing prefix %s", str);
+			iface->pio_filter_length = 0;
+		} else {
+			iface->pio_filter_length = l;
+		}
+		free(astr);
+		syslog(LOG_ERR, "Out");
+	}
 
 	return 0;
 

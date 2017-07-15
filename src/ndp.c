@@ -379,115 +379,119 @@ static void handle_rtnetlink(_unused void *addr, void *data, size_t len,
 		}
 
 		// Lookup interface
-		struct interface *iface = odhcpd_get_interface_by_index(ndm->ndm_ifindex);
-		if (!iface)
-			continue;
+		struct interface *iface;
+		list_for_each_entry(iface, &interfaces, head) {
+			if (iface->ifindex != ndm->ndm_ifindex)
+				continue;
 
-		// Address not specified or unrelated
-		if (!addr || IN6_IS_ADDR_LINKLOCAL(addr) ||
-				IN6_IS_ADDR_MULTICAST(addr))
-			continue;
+			syslog(LOG_ERR, "RTNL on %d", iface->ifindex);
 
-		// Check for states
-		bool add;
-		if (is_addr)
-			add = (nh->nlmsg_type == RTM_NEWADDR);
-		else
-			add = (nh->nlmsg_type == RTM_NEWNEIGH && (ndm->ndm_state &
-				(NUD_REACHABLE | NUD_STALE | NUD_DELAY | NUD_PROBE
-						| NUD_PERMANENT | NUD_NOARP)));
+			// Address not specified or unrelated
+			if (!addr || IN6_IS_ADDR_LINKLOCAL(addr) ||
+					IN6_IS_ADDR_MULTICAST(addr))
+				continue;
 
-		if (iface->ndp == RELAYD_RELAY) {
-			// Replay change to all neighbor cache
-			struct {
-				struct nlmsghdr nh;
-				struct ndmsg ndm;
-				struct nlattr nla_dst;
-				struct in6_addr dst;
-			} req = {
-				{sizeof(req), RTM_DELNEIGH, NLM_F_REQUEST,
-						++rtnl_seqid, 0},
-				{.ndm_family = AF_INET6, .ndm_flags = NTF_PROXY},
-				{sizeof(struct nlattr) + sizeof(struct in6_addr), NDA_DST},
-				*addr
-			};
+			// Check for states
+			bool add;
+			if (is_addr)
+				add = (nh->nlmsg_type == RTM_NEWADDR);
+			else
+				add = (nh->nlmsg_type == RTM_NEWNEIGH && (ndm->ndm_state &
+						(NUD_REACHABLE | NUD_STALE | NUD_DELAY | NUD_PROBE
+								| NUD_PERMANENT | NUD_NOARP)));
 
-			if (ndm->ndm_flags & NTF_PROXY) {
-				// Dump & flush proxy entries
-				if (nh->nlmsg_type == RTM_NEWNEIGH) {
-					req.ndm.ndm_ifindex = iface->ifindex;
-					send(rtnl_event.uloop.fd, &req, sizeof(req), MSG_DONTWAIT);
-					setup_route(addr, iface, false);
-					dump_neigh = true;
-				}
-			} else if (add) {
-				struct interface *c;
-				list_for_each_entry(c, &interfaces, head) {
-					if (iface == c)
-						continue;
+			if (iface->ndp == RELAYD_RELAY) {
+				// Replay change to all neighbor cache
+				struct {
+					struct nlmsghdr nh;
+					struct ndmsg ndm;
+					struct nlattr nla_dst;
+					struct in6_addr dst;
+				} req = {
+						{sizeof(req), RTM_DELNEIGH, NLM_F_REQUEST,
+								++rtnl_seqid, 0},
+								{.ndm_family = AF_INET6, .ndm_flags = NTF_PROXY},
+								{sizeof(struct nlattr) + sizeof(struct in6_addr), NDA_DST},
+								*addr
+				};
 
-					if (c->ndp == RELAYD_RELAY) {
-						req.nh.nlmsg_type = RTM_NEWNEIGH;
-						req.nh.nlmsg_flags |= NLM_F_CREATE | NLM_F_REPLACE;
-
-						req.ndm.ndm_ifindex = c->ifindex;
+				if (ndm->ndm_flags & NTF_PROXY) {
+					// Dump & flush proxy entries
+					if (nh->nlmsg_type == RTM_NEWNEIGH) {
+						req.ndm.ndm_ifindex = iface->ifindex;
 						send(rtnl_event.uloop.fd, &req, sizeof(req), MSG_DONTWAIT);
-					} else { // Delete NDP cache from interfaces without relay
-						req.nh.nlmsg_type = RTM_DELNEIGH;
-						req.nh.nlmsg_flags &= ~(NLM_F_CREATE | NLM_F_REPLACE);
-
-						req.ndm.ndm_ifindex = c->ifindex;
-						send(rtnl_event.uloop.fd, &req, sizeof(req), MSG_DONTWAIT);
+						setup_route(addr, iface, false);
+						dump_neigh = true;
 					}
-				}
-
-				setup_route(addr, iface, true);
-			} else {
-				if (nh->nlmsg_type == RTM_NEWNEIGH) {
-					// might be locally originating
-					if (!IN6_ARE_ADDR_EQUAL(&last_solicited, addr)) {
-						last_solicited = *addr;
-
-						struct interface *c;
-						list_for_each_entry(c, &interfaces, head)
-							if (iface->ndp == RELAYD_RELAY && iface != c &&
-									!c->external == false)
-								ping6(addr, c);
-					}
-				} else {
+				} else if (add) {
 					struct interface *c;
 					list_for_each_entry(c, &interfaces, head) {
-						if (c->ndp == RELAYD_RELAY && iface != c) {
+						if (iface == c)
+							continue;
+
+						if (c->ndp == RELAYD_RELAY) {
+							req.nh.nlmsg_type = RTM_NEWNEIGH;
+							req.nh.nlmsg_flags |= NLM_F_CREATE | NLM_F_REPLACE;
+
+							req.ndm.ndm_ifindex = c->ifindex;
+							send(rtnl_event.uloop.fd, &req, sizeof(req), MSG_DONTWAIT);
+						} else { // Delete NDP cache from interfaces without relay
+							req.nh.nlmsg_type = RTM_DELNEIGH;
+							req.nh.nlmsg_flags &= ~(NLM_F_CREATE | NLM_F_REPLACE);
+
 							req.ndm.ndm_ifindex = c->ifindex;
 							send(rtnl_event.uloop.fd, &req, sizeof(req), MSG_DONTWAIT);
 						}
 					}
-					setup_route(addr, iface, false);
 
-					// also: dump to add proxies back in case it moved elsewhere
-					dump_neigh = true;
+					setup_route(addr, iface, true);
+				} else {
+					if (nh->nlmsg_type == RTM_NEWNEIGH) {
+						// might be locally originating
+						if (!IN6_ARE_ADDR_EQUAL(&last_solicited, addr)) {
+							last_solicited = *addr;
+
+							struct interface *c;
+							list_for_each_entry(c, &interfaces, head)
+							if (iface->ndp == RELAYD_RELAY && iface != c &&
+									!c->external == false)
+								ping6(addr, c);
+						}
+					} else {
+						struct interface *c;
+						list_for_each_entry(c, &interfaces, head) {
+							if (c->ndp == RELAYD_RELAY && iface != c) {
+								req.ndm.ndm_ifindex = c->ifindex;
+								send(rtnl_event.uloop.fd, &req, sizeof(req), MSG_DONTWAIT);
+							}
+						}
+						setup_route(addr, iface, false);
+
+						// also: dump to add proxies back in case it moved elsewhere
+						dump_neigh = true;
+					}
 				}
 			}
-		}
 
-		if (is_addr) {
-			check_updates(iface);
+			if (is_addr) {
+				check_updates(iface);
 
-			if (iface->dhcpv6 == RELAYD_SERVER)
-				iface->ia_reconf = true;
+				if (iface->dhcpv6 == RELAYD_SERVER)
+					iface->ia_reconf = true;
 
-			if (iface->ndp == RELAYD_RELAY && iface->master) {
-				// Replay address changes on all slave interfaces
-				nh->nlmsg_flags = NLM_F_REQUEST;
+				if (iface->ndp == RELAYD_RELAY && iface->master) {
+					// Replay address changes on all slave interfaces
+					nh->nlmsg_flags = NLM_F_REQUEST;
 
-				if (nh->nlmsg_type == RTM_NEWADDR)
-					nh->nlmsg_flags |= NLM_F_CREATE | NLM_F_REPLACE;
+					if (nh->nlmsg_type == RTM_NEWADDR)
+						nh->nlmsg_flags |= NLM_F_CREATE | NLM_F_REPLACE;
 
-				struct interface *c;
-				list_for_each_entry(c, &interfaces, head) {
-					if (c->ndp == RELAYD_RELAY && !c->master) {
-						ndm->ndm_ifindex = c->ifindex;
-						send(rtnl_event.uloop.fd, nh, nh->nlmsg_len, MSG_DONTWAIT);
+					struct interface *c;
+					list_for_each_entry(c, &interfaces, head) {
+						if (c->ndp == RELAYD_RELAY && !c->master) {
+							ndm->ndm_ifindex = c->ifindex;
+							send(rtnl_event.uloop.fd, nh, nh->nlmsg_len, MSG_DONTWAIT);
+						}
 					}
 				}
 			}

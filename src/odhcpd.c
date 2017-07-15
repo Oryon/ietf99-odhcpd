@@ -428,25 +428,42 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _unused unsigned int even
 		if (addr.ll.sll_family == AF_PACKET)
 			destiface = addr.ll.sll_ifindex;
 
-		struct interface *iface =
-				odhcpd_get_interface_by_index(destiface);
+		if (addr.nl.nl_family == AF_NETLINK) {
+			char ipbuf[INET6_ADDRSTRLEN] = "kernel";
+			if (addr.ll.sll_family == AF_PACKET &&
+					len >= (ssize_t)sizeof(struct ip6_hdr))
+				inet_ntop(AF_INET6, &data_buf[8], ipbuf, sizeof(ipbuf));
+			else if (addr.in6.sin6_family == AF_INET6)
+				inet_ntop(AF_INET6, &addr.in6.sin6_addr, ipbuf, sizeof(ipbuf));
+			else if (addr.in.sin_family == AF_INET)
+				inet_ntop(AF_INET, &addr.in.sin_addr, ipbuf, sizeof(ipbuf));
 
-		if (!iface && addr.nl.nl_family != AF_NETLINK)
-			continue;
+			syslog(LOG_ERR, "Received %li Bytes from %s%%%s", (long)len,
+					ipbuf, "netlink");
 
-		char ipbuf[INET6_ADDRSTRLEN] = "kernel";
-		if (addr.ll.sll_family == AF_PACKET &&
-				len >= (ssize_t)sizeof(struct ip6_hdr))
-			inet_ntop(AF_INET6, &data_buf[8], ipbuf, sizeof(ipbuf));
-		else if (addr.in6.sin6_family == AF_INET6)
-			inet_ntop(AF_INET6, &addr.in6.sin6_addr, ipbuf, sizeof(ipbuf));
-		else if (addr.in.sin_family == AF_INET)
-			inet_ntop(AF_INET, &addr.in.sin_addr, ipbuf, sizeof(ipbuf));
+			e->handle_dgram(&addr, data_buf, len, NULL, dest);
+			return;
+		}
 
-		syslog(LOG_DEBUG, "Received %li Bytes from %s%%%s", (long)len,
-				ipbuf, (iface) ? iface->ifname : "netlink");
+		struct interface *iface;
+		list_for_each_entry(iface, &interfaces, head) {
+			if (iface->ifindex != destiface)
+				continue;
 
-		e->handle_dgram(&addr, data_buf, len, iface, dest);
+			char ipbuf[INET6_ADDRSTRLEN] = "kernel";
+			if (addr.ll.sll_family == AF_PACKET &&
+					len >= (ssize_t)sizeof(struct ip6_hdr))
+				inet_ntop(AF_INET6, &data_buf[8], ipbuf, sizeof(ipbuf));
+			else if (addr.in6.sin6_family == AF_INET6)
+				inet_ntop(AF_INET6, &addr.in6.sin6_addr, ipbuf, sizeof(ipbuf));
+			else if (addr.in.sin_family == AF_INET)
+				inet_ntop(AF_INET, &addr.in.sin_addr, ipbuf, sizeof(ipbuf));
+
+			syslog(LOG_ERR, "Received %li Bytes from %s%%%s", (long)len,
+					ipbuf, (iface) ? iface->ifname : "netlink");
+
+			e->handle_dgram(&addr, data_buf, len, iface, dest);
+		}
 	}
 }
 

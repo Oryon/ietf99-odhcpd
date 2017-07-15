@@ -37,7 +37,7 @@ static void sigusr1_refresh(int signal);
 static struct odhcpd_event router_event = {{.fd = -1}, handle_icmpv6, NULL};
 
 static FILE *fp_route = NULL;
-#define RA_IOV_LEN 6
+#define RA_IOV_LEN 7
 
 #define TIME_LEFT(t1, now) ((t1) != UINT32_MAX ? (t1) - (now) : UINT32_MAX)
 
@@ -276,6 +276,10 @@ static uint64_t send_router_advert(struct interface *iface, const struct in6_add
 		if (addr->prefix > 96 || addr->valid <= (uint32_t)now)
 			continue; // Address not suitable
 
+		if (odhcpd_bmemcmp(&addr->addr, &iface->pio_filter_addr, iface->pio_filter_length) != 0 ||
+				addr->prefix < iface->pio_filter_length)
+			continue; // PIO filtered out of this RA
+
 		struct nd_opt_prefix_info *p = NULL;
 		for (size_t i = 0; i < cnt; ++i) {
 			if (addr->prefix == adv.prefix[i].nd_opt_pi_prefix_len &&
@@ -344,8 +348,6 @@ static uint64_t send_router_advert(struct interface *iface, const struct in6_add
 		uint8_t pad2;
 		uint32_t lifetime;
 	} dns = {ND_OPT_RECURSIVE_DNS, (1 + (2 * dns_cnt)), 0, 0, 0};
-
-
 
 	// DNS Search options
 	uint8_t search_buf[256], *search_domain = iface->search;
@@ -419,6 +421,21 @@ static uint64_t send_router_advert(struct interface *iface, const struct in6_add
 		++routes_cnt;
 	}
 
+	// PVD Option
+	struct {
+		uint8_t type;
+		uint8_t len;
+		uint16_t flags;
+		uint32_t lifetime;
+		uint8_t id[1024];
+	} pvd = { .type = 253, .lifetime = 0xffffffff };
+
+	if (iface->pvd_id != 0 && iface->pvd_id_len < 1024) {
+		memcpy(pvd.id, iface->pvd_id, iface->pvd_id_len);
+		pvd.flags = htons((iface->pvd_http << 11) | (iface->pvd_legacy << 10));
+		pvd.len = (8 + iface->pvd_id_len - 1) / 8 + 1;
+	}
+
 	// Calculate periodic transmit
 	int msecs = 0;
 	uint32_t maxival = iface->ra_maxinterval * 1000;
@@ -450,6 +467,7 @@ static uint64_t send_router_advert(struct interface *iface, const struct in6_add
 
 	struct iovec iov[RA_IOV_LEN] = {
 			{&adv, (uint8_t*)&adv.prefix[cnt] - (uint8_t*)&adv},
+			{&pvd, pvd.len ? pvd.len * 8 : 0 },
 			{&routes, routes_cnt * sizeof(*routes)},
 			{&dns, (dns_cnt) ? sizeof(dns) : 0},
 			{dns_addr, dns_cnt * sizeof(*dns_addr)},
